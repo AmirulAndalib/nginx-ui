@@ -28,7 +28,7 @@
     "ace-builds": "^1.39.1",
     "ant-design-vue": "^4.2.6",
     "apexcharts": "^4.5.0",
-    "axios": "^1.8.4",
+    "axios": "^1.20.0",
     "dayjs": "^1.11.13",
     "highlight.js": "^11.11.1",
     "jsencrypt": "^3.3.2",
@@ -72,12 +72,12 @@
     "eslint": "9.24.0",
     "eslint-plugin-sonarjs": "^3.0.2",
     "less": "^4.3.0",
-    "postcss": "^8.5.3",
+    "postcss": "^8.5.23",
     "typescript": "5.8.3",
     "unplugin-auto-import": "^19.1.2",
     "unplugin-vue-components": "^28.4.1",
     "unplugin-vue-define-options": "^1.5.5",
-    "vite": "^6.2.6",
+    "vite": "^6.4.4",
     "vite-svg-loader": "^5.1.0",
     "vue-tsc": "^2.2.8"
   }
