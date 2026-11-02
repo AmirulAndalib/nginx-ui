@@ -31,11 +31,6 @@ func RegisterPredefinedNodes(ctx context.Context) {
 				return
 			}
 
-			if node.URL == "" {
-				logger.Error(sanitizePredefinedNodeURL(nodeUrl), "Node URL is required")
-				return
-			}
-
 			if node.Token == "" {
 				logger.Error(sanitizePredefinedNodeURL(nodeUrl), "Node Token is required")
 				return
@@ -102,6 +97,9 @@ func parseNodeUrl(nodeUrl string) (node *model.Node, err error) {
 	u, err := url.Parse(nodeUrl)
 	if err != nil {
 		return
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, errors.New("node URL must be an absolute http or https URL")
 	}
 	var sb strings.Builder
 	sb.WriteString(u.Scheme)

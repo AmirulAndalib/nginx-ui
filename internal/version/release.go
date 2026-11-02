@@ -68,12 +68,12 @@ func getLatestRelease() (data TRelease, err error) {
 		err = errors.Wrap(err, "service.getLatestRelease http.Get err")
 		return
 	}
+	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		err = errors.Wrap(err, "service.getLatestRelease io.ReadAll err")
 		return
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		err = cosy.WrapErrorWithParams(ErrReleaseAPIFailed, string(body))
 		return
@@ -97,12 +97,12 @@ func getLatestPrerelease() (data TRelease, err error) {
 		err = errors.Wrap(err, "service.getLatestPrerelease http.Get err")
 		return
 	}
+	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		err = errors.Wrap(err, "service.getLatestPrerelease io.ReadAll err")
 		return
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		err = cosy.WrapErrorWithParams(ErrReleaseAPIFailed, string(body))
 		return

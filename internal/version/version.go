@@ -29,8 +29,8 @@ func GetVersionInfo() *Info {
 }
 
 func GetShortHash() string {
-	if Hash != "" {
+	if len(Hash) > 8 {
 		return Hash[:8]
 	}
-	return ""
+	return Hash
 }

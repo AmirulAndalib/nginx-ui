@@ -1,6 +1,8 @@
 package cron
 
 import (
+	"errors"
+
 	"github.com/0xJacky/Nginx-UI/internal/logrotate"
 	"github.com/0xJacky/Nginx-UI/settings"
 	"github.com/go-co-op/gocron/v2"
@@ -13,6 +15,7 @@ var logrotateJobInstance gocron.Job
 // setupLogrotateJob initializes and starts the logrotate job
 func setupLogrotateJob(scheduler gocron.Scheduler) {
 	if !settings.LogrotateSettings.Enabled {
+		logrotateJobInstance = nil
 		return
 	}
 	if !settings.LogrotateSettings.HasValidInterval() {
@@ -37,7 +40,7 @@ func restartLogrotateJob(scheduler gocron.Scheduler) {
 	logger.Debug("Restart Logrotate")
 	if logrotateJobInstance != nil {
 		err := scheduler.RemoveJob(logrotateJobInstance.ID())
-		if err != nil {
+		if err != nil && !errors.Is(err, gocron.ErrJobNotFound) {
 			logger.Error(err)
 			return
 		}

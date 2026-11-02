@@ -150,7 +150,7 @@ func DownloadGeoLiteDB(progressChan chan float64) error {
 // DecompressGeoLiteDB decompresses the .xz file to .mmdb
 func DecompressGeoLiteDB(progressChan chan float64) error {
 	xzPath := GetDBXZPath()
-	dbPath := GetDBPath()
+	dbPath := getDefaultDBPath()
 
 	// Open compressed file
 	xzFile, err := os.Open(xzPath)

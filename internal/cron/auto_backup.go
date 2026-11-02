@@ -108,10 +108,9 @@ func executeAutoBackupTask(backupID uint64) {
 func RestartAutoBackupJobs() error {
 	logger.Info("Restarting auto backup jobs...")
 
+	// Remove all existing jobs. The lock must be released before re-adding,
+	// because addAutoBackupJob acquires it for every job.
 	autoBackupMu.Lock()
-	defer autoBackupMu.Unlock()
-
-	// Remove all existing jobs
 	for backupID, job := range autoBackupJobs {
 		err := s.RemoveJob(job.ID())
 		if err != nil {
@@ -119,6 +118,7 @@ func RestartAutoBackupJobs() error {
 		}
 	}
 	autoBackupJobs = make(map[uint64]gocron.Job)
+	autoBackupMu.Unlock()
 
 	// Re-add all enabled jobs
 	err := setupAutoBackupJobs(s)

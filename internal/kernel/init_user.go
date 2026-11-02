@@ -5,6 +5,7 @@ import (
 
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/uozi-tech/cosy"
+	"github.com/uozi-tech/cosy/logger"
 )
 
 func InitUser(ctx context.Context) {
@@ -25,5 +26,11 @@ func InitUser(ctx context.Context) {
 
 	// if user is found, check if the user is deleted
 	// if the user is deleted, restore the user
-	db.Unscoped().Where("id = ?", 1).Update("deleted_at", nil)
+	if user.DeletedAt == nil {
+		return
+	}
+	err := db.Unscoped().Model(&model.User{}).Where("id = ?", 1).Update("deleted_at", nil).Error
+	if err != nil {
+		logger.Error("Failed to restore the initial user:", err)
+	}
 }

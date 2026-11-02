@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
+
+	"github.com/uozi-tech/cosy"
 )
 
 type TCommit struct {
@@ -22,16 +25,10 @@ func getDevBuild() (data TRelease, err error) {
 	if err != nil {
 		return
 	}
-	resp, err := client.Get(GetGithubDevCommitAPIUrl())
+	body, err := getAPIBody(client, GetGithubDevCommitAPIUrl())
 	if err != nil {
 		return
 	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
 	commit := TCommit{}
 	err = json.Unmarshal(body, &commit)
 	if err != nil {
@@ -43,16 +40,10 @@ func getDevBuild() (data TRelease, err error) {
 	}
 	shortSHA := commit.SHA[:7]
 
-	resp, err = client.Get(fmt.Sprintf("%sdev-builds", CloudflareWorkerAPI))
+	body, err = getAPIBody(client, fmt.Sprintf("%sdev-builds", CloudflareWorkerAPI))
 	if err != nil {
 		return
 	}
-
-	body, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
 
 	assets := make([]TReleaseAsset, 0)
 	err = json.Unmarshal(body, &assets)
@@ -71,4 +62,23 @@ func getDevBuild() (data TRelease, err error) {
 	}
 
 	return
+}
+
+// getAPIBody fetches url and returns its body, treating any non-200 status
+// as ErrReleaseAPIFailed like the stable and prerelease lookups do.
+func getAPIBody(client *http.Client, url string) ([]byte, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, cosy.WrapErrorWithParams(ErrReleaseAPIFailed, string(body))
+	}
+	return body, nil
 }
