@@ -2,12 +2,121 @@ package config
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/uozi-tech/cosy"
 )
+
+func TestIncludeGlobDotEntriesAreValidated(t *testing.T) {
+	confDir := setupTokenizerConfDir(t)
+	path := filepath.Join(confDir, "conf.d", "app.conf")
+	if err := os.MkdirAll(filepath.Join(confDir, "conf.d", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeIncludeTestFile(t, filepath.Join(confDir, "conf.d", "evil.inc"), "js_import m.js;\n")
+	writeIncludeTestFile(t, filepath.Join(confDir, "top.inc"), "load_module modules/ngx_http_perl_module.so;\n")
+
+	// A second temp dir shares the parent of confDir, so ".." can reach it.
+	outside := t.TempDir()
+	if filepath.Dir(outside) != filepath.Dir(confDir) {
+		t.Fatalf("temp dirs do not share a parent: %s, %s", outside, confDir)
+	}
+	writeIncludeTestFile(t, filepath.Join(outside, "x.inc"), "user root;\n")
+	writeIncludeTestFile(t, filepath.Join(outside, "a", "evil.inc"), "perl_set $x 'sub { 1 }';\n")
+	if err := os.MkdirAll(filepath.Join(outside, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "a", "b"), filepath.Join(confDir, "conf.d", "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		pattern   string
+		wantParam string
+	}{
+		{"conf.d/su*/../evil.inc", "js_import"},
+		// "*" matches both "link" and "sub"; "link" sorts first.
+		{"conf.d/*/../evil.inc", "perl_set"},
+		{"conf.d/s?b/../evil.inc", "js_import"},
+		{"conf.d/.*/top.inc", "load_module"},
+		{"conf.d/.?/top.inc", "load_module"},
+		{"conf.d/.*/conf.d/evil.inc", "js_import"},
+		{"conf.d/sub/.*/evil.inc", "js_import"},
+		{"conf.d/*/../../../" + filepath.Base(outside) + "/x.inc", "user root"},
+		// ".." from a symlinked directory leaves through the link target.
+		{"conf.d/l*/../evil.inc", "perl_set"},
+	}
+	for _, tc := range cases {
+		t.Run("relative/"+tc.pattern, func(t *testing.T) {
+			requireRestrictedDirectiveError(t, ValidateConfigFile(path, "include "+tc.pattern+";\n"), tc.wantParam)
+		})
+		t.Run("absolute/"+tc.pattern, func(t *testing.T) {
+			content := "include " + confDir + "/" + tc.pattern + ";\n"
+			requireRestrictedDirectiveError(t, ValidateConfigFile(path, content), tc.wantParam)
+		})
+	}
+}
+
+func TestIncludeGlobMatchesBytesNotRunes(t *testing.T) {
+	confDir := setupTokenizerConfDir(t)
+	path := filepath.Join(confDir, "conf.d", "app.conf")
+	writeIncludeTestFile(t, filepath.Join(confDir, "conf.d", "é.inc"), "js_import m.js;\n")
+	writeIncludeTestFile(t, filepath.Join(confDir, "conf.d", "ü", "e.inc"), "js_import m.js;\n")
+
+	// nginx runs glob(3) in the C locale, where "?" and "[...]" match one byte.
+	for _, pattern := range []string{
+		"conf.d/??.inc",
+		"conf.d/[é][é].inc",
+		"conf.d/?[^x].inc",
+		"conf.d/??/e.inc",
+		"conf.d/[ü][ü]/?.inc",
+	} {
+		t.Run(pattern, func(t *testing.T) {
+			requireRestrictedDirectiveError(t, ValidateConfigFile(path, "include "+pattern+";\n"), "js_import")
+			content := "include " + confDir + "/" + pattern + ";\n"
+			requireRestrictedDirectiveError(t, ValidateConfigFile(path, content), "js_import")
+		})
+	}
+}
+
+func TestIncludeGlobKeepsGlibcDotfileAndMissingBehavior(t *testing.T) {
+	confDir := setupTokenizerConfDir(t)
+	path := filepath.Join(confDir, "nginx.conf")
+	writeIncludeTestFile(t, filepath.Join(confDir, "conf.d", "a.conf"), "# ok\n")
+	// glob(3) without GLOB_PERIOD never lets a wildcard match a leading
+	// dot, so nginx does not load these files either.
+	writeIncludeTestFile(t, filepath.Join(confDir, "conf.d", ".disabled.conf"), "js_import m.js;\n")
+	writeIncludeTestFile(t, filepath.Join(confDir, "sites-enabled", ".swp"), "js_import m.js;\n")
+
+	for _, content := range []string{
+		"include conf.d/*.conf;\n",
+		"include " + confDir + "/conf.d/*.conf;\n",
+		"include conf.d/[!.]*.conf;\n",
+		"include conf.d/?*.conf;\n",
+		"include sites-enabled/*;\n",
+		"include missing.d/*/x.conf;\n",
+		"include conf.d/missing/*.conf;\n",
+	} {
+		t.Run(content, func(t *testing.T) {
+			if err := ValidateConfigFile(path, content); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+
+	t.Run("explicit dot still matches", func(t *testing.T) {
+		requireRestrictedDirectiveError(t, ValidateConfigFile(path, "include conf.d/.*.conf;\n"), "js_import")
+	})
+
+	t.Run("malformed pattern in a missing directory", func(t *testing.T) {
+		if err := ValidateConfigFile(path, "include missing.d/[]a]*.conf;\n"); err == nil {
+			t.Fatal("expected malformed pattern error")
+		}
+	})
+}
 
 // nginx resolves include patterns with glob(3) and opens arguments without
 // "*?[" literally. The validator resolves them with Go's Glob, so any pattern
@@ -156,7 +265,8 @@ func TestVisitStatementsWithIncludesUsesGlibcGlobSyntax(t *testing.T) {
 	writeIncludeTestFile(t, filepath.Join(root, "snippets", `b\c.conf`), "ssl_certificate b.cer;\n")
 
 	content := "include snippets/[!.]*.conf;\ninclude " + filepath.Join(root, "snippets", `b\c.conf`) +
-		";\ninclude snippets/[[:alpha:]].conf;\n"
+		";\ninclude snippets/[[:alpha:]].conf;\ninclude snippets/.?/snippets/a.conf;\ninclude snippets/??.cer;\n"
+	writeIncludeTestFile(t, filepath.Join(root, "snippets", "é.cer"), "ssl_certificate e.cer;\n")
 	got := collectIncludedStatements("", content)
 	want := []string{
 		"0:include snippets/[!.]*.conf",
@@ -165,6 +275,10 @@ func TestVisitStatementsWithIncludesUsesGlibcGlobSyntax(t *testing.T) {
 		"0:include " + filepath.Join(root, "snippets", `b\c.conf`),
 		"1:ssl_certificate b.cer",
 		"0:include snippets/[[:alpha:]].conf",
+		"0:include snippets/.?/snippets/a.conf",
+		"1:ssl_certificate a.cer",
+		"0:include snippets/??.cer",
+		"1:ssl_certificate e.cer",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("statements = %#v, want %#v", got, want)
