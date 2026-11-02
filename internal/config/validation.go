@@ -196,6 +196,11 @@ type nginxConfigLexer struct {
 	// new token. Only there does '#' start a comment and a quote open a
 	// quoted token.
 	tokenStart bool
+	// nginxEscapes resolves backslash escapes into the exact value
+	// ngx_conf_read_token gives the directive, instead of dropping every
+	// backslash. Include arguments need it: they name files, and a file
+	// reached through a different name would escape validation.
+	nginxEscapes bool
 }
 
 func ValidateConfigFile(path string, content string) error {
@@ -337,7 +342,18 @@ func ValidateConfigDirectives(content []byte) error {
 }
 
 func visitConfigStatements(content []byte, visit func([]string) error) error {
-	lexer := &nginxConfigLexer{content: content, tokenStart: true}
+	return visitStatements(&nginxConfigLexer{content: content, tokenStart: true}, visit)
+}
+
+// visitConfigStatementsAsNginx is visitConfigStatements with every word
+// holding the value nginx reads for it, backslashes kept where nginx keeps
+// them. The denylist uses the stricter visitConfigStatements; this is for
+// arguments that must match exactly, such as include paths.
+func visitConfigStatementsAsNginx(content []byte, visit func([]string) error) error {
+	return visitStatements(&nginxConfigLexer{content: content, tokenStart: true, nginxEscapes: true}, visit)
+}
+
+func visitStatements(lexer *nginxConfigLexer, visit func([]string) error) error {
 	statement := make([]string, 0, 4)
 
 	for {
@@ -569,9 +585,7 @@ func (lexer *nginxConfigLexer) readQuotedToken(quote rune, quoteSize int) nginxC
 		}
 
 		if r == '\\' && lexer.offset < len(lexer.content) {
-			escaped, escapedSize := utf8.DecodeRune(lexer.content[lexer.offset:])
-			lexer.offset += escapedSize
-			builder.WriteRune(escaped)
+			lexer.writeEscape(&builder)
 			continue
 		}
 
@@ -581,6 +595,30 @@ func (lexer *nginxConfigLexer) readQuotedToken(quote rune, quoteSize int) nginxC
 	return nginxConfigToken{kind: nginxConfigTokenWord, value: builder.String()}
 }
 
+// writeEscape writes the character after a backslash, which the lexer has
+// consumed. By default the backslash is dropped. With nginxEscapes it follows
+// the copy loop of ngx_conf_read_token: a backslash before a quote or a
+// backslash is dropped, \t, \r and \n become the control characters, and any
+// other backslash stays in the word.
+func (lexer *nginxConfigLexer) writeEscape(builder *strings.Builder) {
+	escaped, escapedSize := utf8.DecodeRune(lexer.content[lexer.offset:])
+	lexer.offset += escapedSize
+	if lexer.nginxEscapes {
+		switch escaped {
+		case '"', '\'', '\\':
+		case 't':
+			escaped = '\t'
+		case 'r':
+			escaped = '\r'
+		case 'n':
+			escaped = '\n'
+		default:
+			builder.WriteByte('\\')
+		}
+	}
+	builder.WriteRune(escaped)
+}
+
 // readUnquotedToken reads a token up to the characters that end one in
 // ngx_conf_read_token: whitespace, ';' and '{'. '#', '}' and quotes are
 // ordinary characters inside a token, and a backslash keeps the next
@@ -588,9 +626,10 @@ func (lexer *nginxConfigLexer) readQuotedToken(quote rune, quoteSize int) nginxC
 // its variable flag on '$' and skips '{' while the flag is set, which keeps
 // "${name}" intact.
 //
-// An escape drops the backslash before every character, while nginx keeps it
-// unless a quote, a backslash, t, r or n follows. That only makes the words
-// the denylist compares stricter; token boundaries are the same.
+// By default an escape drops the backslash before every character, while
+// nginx keeps it unless a quote, a backslash, t, r or n follows. That only
+// makes the words the denylist compares stricter; token boundaries are the
+// same. Include paths use nginxEscapes to get nginx's exact value.
 func (lexer *nginxConfigLexer) readUnquotedToken() nginxConfigToken {
 	var builder strings.Builder
 	variable := false
@@ -612,9 +651,7 @@ func (lexer *nginxConfigLexer) readUnquotedToken() nginxConfigToken {
 
 		lexer.offset += size
 		if r == '\\' && lexer.offset < len(lexer.content) {
-			escaped, escapedSize := utf8.DecodeRune(lexer.content[lexer.offset:])
-			lexer.offset += escapedSize
-			builder.WriteRune(escaped)
+			lexer.writeEscape(&builder)
 			continue
 		}
 

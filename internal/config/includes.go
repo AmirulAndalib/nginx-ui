@@ -1,12 +1,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
 	"github.com/0xJacky/Nginx-UI/settings"
+	"github.com/uozi-tech/cosy"
 )
 
 const (
@@ -68,7 +71,7 @@ func (validator *configIncludeValidator) validate(path string, content []byte, d
 	if err := ValidateConfigContentBytes(content); err != nil {
 		return err
 	}
-	if err := visitConfigStatements(content, func(statement []string) error {
+	if err := visitConfigStatementsAsNginx(content, func(statement []string) error {
 		if len(statement) != 2 || !strings.EqualFold(statement[0], "include") {
 			return nil
 		}
@@ -76,8 +79,11 @@ func (validator *configIncludeValidator) validate(path string, content []byte, d
 		if !filepath.IsAbs(pattern) {
 			pattern = filepath.Join(validator.base, pattern)
 		}
-		matches, err := nginx.Glob(glibcGlobPattern(pattern))
+		matches, err := resolveIncludePattern(pattern)
 		if err != nil {
+			if _, ok := errors.AsType[*cosy.Error](err); ok {
+				return err
+			}
 			return fmt.Errorf("resolve nginx include %s: %w", pattern, err)
 		}
 		for _, match := range matches {
@@ -138,7 +144,7 @@ func (walker *includeWalker) walk(path string, content []byte, depth int) {
 	walker.files++
 	walker.bytes += len(content)
 
-	_ = visitConfigStatements(content, func(statement []string) error {
+	_ = visitConfigStatementsAsNginx(content, func(statement []string) error {
 		if len(statement) == 0 {
 			return nil
 		}
@@ -157,7 +163,7 @@ func (walker *includeWalker) include(pattern string, depth int) {
 	if !filepath.IsAbs(pattern) {
 		pattern = filepath.Join(walker.base, pattern)
 	}
-	matches, err := nginx.Glob(pattern)
+	matches, err := resolveIncludePattern(pattern)
 	if err != nil {
 		return
 	}
@@ -177,10 +183,75 @@ func (walker *includeWalker) include(pattern string, depth int) {
 	}
 }
 
-// glibcGlobPattern rewrites the glob(3) negated character class "[!...]",
-// which nginx resolves includes with, into the "[^...]" form Go's matcher
-// understands. Without it Go matches nothing for "[!x]" while nginx loads the
-// files, so they would escape validation.
-func glibcGlobPattern(pattern string) string {
-	return strings.ReplaceAll(pattern, "[!", "[^")
+// resolveIncludePattern returns the files nginx would read for an include
+// argument. nginx opens the argument literally unless it contains one of
+// "*?[", and only then resolves it with glob(3). Go's Glob would read a
+// backslash in a literal path as an escape and look up a different name, so
+// literal paths are checked as they are.
+func resolveIncludePattern(pattern string) ([]string, error) {
+	if !strings.ContainsAny(pattern, "*?[") {
+		if _, err := nginx.Lstat(pattern); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return []string{pattern}, nil
+	}
+	translated, err := glibcGlobPattern(pattern)
+	if err != nil {
+		return nil, err
+	}
+	return nginx.Glob(translated)
+}
+
+// glibcGlobPattern converts an include pattern from the glob(3) syntax nginx
+// resolves includes with into the syntax of Go's matcher, which the local and
+// the SFTP Glob both use. Where the two read a pattern differently, Go matches
+// nothing while nginx loads files that would then escape validation, so every
+// bracket expression is checked:
+//   - the negated form "[!...]" is rewritten to "[^...]";
+//   - POSIX character classes "[:name:]", collating symbols "[.x.]" and
+//     equivalence classes "[=x=]" have no Go equivalent and are rejected.
+//
+// Other malformed brackets are copied unchanged: Go rejects them with
+// ErrBadPattern, so validation still fails closed.
+func glibcGlobPattern(pattern string) (string, error) {
+	var out strings.Builder
+	out.Grow(len(pattern))
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		if c == '\\' && i+1 < len(pattern) {
+			out.WriteByte(c)
+			i++
+			out.WriteByte(pattern[i])
+			continue
+		}
+		out.WriteByte(c)
+		if c != '[' {
+			continue
+		}
+		i++
+		if i < len(pattern) && pattern[i] == '!' {
+			out.WriteByte('^')
+			i++
+		}
+		for ; i < len(pattern); i++ {
+			c = pattern[i]
+			if c == '\\' && i+1 < len(pattern) {
+				out.WriteByte(c)
+				i++
+				out.WriteByte(pattern[i])
+				continue
+			}
+			if c == '[' && i+1 < len(pattern) && strings.IndexByte(":.=", pattern[i+1]) >= 0 {
+				return "", cosy.WrapErrorWithParams(ErrConfigIncludeGlobUnsupported, pattern)
+			}
+			out.WriteByte(c)
+			if c == ']' {
+				break
+			}
+		}
+	}
+	return out.String(), nil
 }
