@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -86,9 +87,11 @@ func runSimpleProductionTest(t *testing.T, recordCount int) {
 	t.Logf("⚙️  Setup Time: %v", setupTime)
 	t.Logf("🔧 Processing Time: %v", productionTime)
 
-	if result != nil {
-		t.Logf("✅ Success Rate: %.1f%%", result.SuccessRate*100)
-		t.Logf("📋 Processed/Succeeded: %d/%d", result.Processed, result.Succeeded)
+	t.Logf("✅ Success Rate: %.1f%%", result.SuccessRate*100)
+	t.Logf("📋 Processed/Succeeded: %d/%d", result.Processed, result.Succeeded)
+
+	if result.Processed != recordCount || result.Succeeded != result.Processed {
+		t.Errorf("indexed %d/%d documents, want %d/%d", result.Succeeded, result.Processed, recordCount, recordCount)
 	}
 }
 
@@ -140,12 +143,12 @@ func runActualProductionWorkflow(t *testing.T, config *indexer.Config, logFile s
 
 	t.Logf("📋 Parsed %d records successfully", len(parseResult.Entries))
 
-	// Index a subset of documents (to avoid timeout while still being realistic)
-	maxToIndex := min(len(parseResult.Entries), 5000) // Limit for testing
-	indexed := 0
-
-	for i, entry := range parseResult.Entries[:maxToIndex] {
-		doc := &indexer.Document{
+	// Index in config-sized batches like production does. Submitting one
+	// document per job creates one bleve batch (and one scorch segment) per
+	// record, which keeps the merger busy for tens of seconds under -race.
+	docs := make([]*indexer.Document, 0, len(parseResult.Entries))
+	for i, entry := range parseResult.Entries {
+		docs = append(docs, &indexer.Document{
 			ID: fmt.Sprintf("doc_%d", i),
 			Fields: &indexer.LogDocument{
 				Timestamp:   entry.Timestamp,
@@ -167,27 +170,20 @@ func runActualProductionWorkflow(t *testing.T, config *indexer.Config, logFile s
 				MainLogPath: logFile,
 				Raw:         entry.Raw,
 			},
-		}
-
-		if err := indexerInstance.IndexDocument(ctx, doc); err == nil {
-			indexed++
-		}
-
-		// Progress feedback
-		if i%1000 == 0 && i > 0 {
-			t.Logf("📊 Indexed %d documents...", i)
-		}
+		})
 	}
 
-	// Flush
-	if err := indexerInstance.FlushAll(); err != nil {
-		t.Logf("Warning: Flush failed: %v", err)
+	indexed := 0
+	for batch := range slices.Chunk(docs, config.BatchSize) {
+		if err := indexerInstance.IndexDocuments(ctx, batch); err == nil {
+			indexed += len(batch)
+		}
 	}
 
 	return &SimpleResult{
-		Processed:   maxToIndex,
+		Processed:   len(docs),
 		Succeeded:   indexed,
-		SuccessRate: float64(indexed) / float64(maxToIndex),
+		SuccessRate: float64(indexed) / float64(len(docs)),
 	}
 }
 
@@ -234,11 +230,4 @@ func (s *SimpleGeoIPService) Search(ip string) (*parser.GeoLocation, error) {
 		Province:    "California",
 		City:        "San Francisco",
 	}, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
